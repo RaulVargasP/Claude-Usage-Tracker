@@ -30,6 +30,11 @@ class ProfileManager: ObservableObject {
     func loadProfiles() {
         profiles = profileStore.loadProfiles()
 
+        // Mirror cux's account roster before the minimum-profile check: on a
+        // fresh install with cux present this seeds one profile per managed
+        // account instead of a single empty default.
+        syncProfilesFromCux()
+
         // Ensure minimum 1 profile
         if profiles.isEmpty {
             let defaultProfile = createDefaultProfile()
@@ -55,6 +60,49 @@ class ProfileManager: ObservableObject {
         multiProfileConfig = profileStore.loadMultiProfileConfig()
 
         LoggingService.shared.log("ProfileManager: Loaded \(profiles.count) profile(s), active: \(activeProfile?.name ?? "none")")
+    }
+
+    // MARK: - cux Roster Sync
+
+    /// Mirrors the `cux` account switcher's roster into the profile list: every
+    /// account cux manages that has no matching profile here (by account uuid,
+    /// falling back to email) gets one auto-created — named after its cux alias,
+    /// selected for display, and credentialed read-only from cux's backup entry,
+    /// so it starts polling without any login. Never deletes or renames existing
+    /// profiles: accounts the user tracks outside cux are left alone.
+    func syncProfilesFromCux() {
+        let managed = CuxBridge.shared.managedAccounts()
+        guard !managed.isEmpty else { return }
+
+        var changed = false
+        for account in managed {
+            let alreadyMirrored = profiles.contains { profile in
+                guard let identity = cliSyncService.accountIdentity(fromOAuthAccountJSON: profile.oauthAccountJSON) else {
+                    return false
+                }
+                if let uuid = account.accountUuid, identity == uuid { return true }
+                return identity.lowercased() == account.email.lowercased()
+            }
+            guard !alreadyMirrored else { continue }
+
+            let slot = CuxBridge.Slot(number: account.slot, email: account.email)
+            let credentials = CuxBridge.shared.readCredentials(slot)
+            let fallbackName = account.email.split(separator: "@").first.map(String.init) ?? "cux-\(account.slot)"
+            let profile = Profile(
+                name: account.alias ?? fallbackName,
+                cliCredentialsJSON: credentials,
+                hasCliAccount: credentials != nil,
+                oauthAccountJSON: account.oauthAccountJSON,
+                isSelectedForDisplay: true
+            )
+            profiles.append(profile)
+            changed = true
+            LoggingService.shared.log("syncProfilesFromCux: created profile '\(profile.name)' for cux slot \(account.slot) (\(account.email))")
+        }
+
+        if changed {
+            profileStore.saveProfiles(profiles)
+        }
     }
 
     // MARK: - Profile Operations

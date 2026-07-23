@@ -1038,6 +1038,10 @@ class MenuBarManager: NSObject, ObservableObject {
 
     /// Refreshes usage data for all profiles selected for multi-profile display
     private func refreshAllSelectedProfiles() {
+        // Pick up accounts added to cux since the last cycle (cheap: one small
+        // JSON read; only mutates when the roster actually grew).
+        profileManager.syncProfilesFromCux()
+
         // Filter on `hasAnyCredentials` (not `hasUsageCredentials`) so that profiles
         // whose CLI OAuth token has expired are still polled — `fetchUsageForProfile`
         // will transparently refresh expired tokens via the refresh_token grant.

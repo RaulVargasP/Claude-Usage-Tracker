@@ -60,6 +60,47 @@ final class CuxBridge {
         return slot(forEmail: email)
     }
 
+    // MARK: - Account roster
+
+    struct ManagedAccount {
+        let slot: Int
+        let email: String
+        let alias: String?
+        let accountUuid: String?
+        /// Raw JSON of the account's oauth block (`~/.cux/accounts/<slot>-<email>/oauth.json`),
+        /// the same shape `.claude.json` stores under `oauthAccount`.
+        let oauthAccountJSON: String?
+    }
+
+    /// The roster of accounts cux manages, per `~/.cux/state.json` (slot, email,
+    /// alias, account uuid) joined with each slot's `oauth.json`. Empty when cux
+    /// is absent — callers treat that as "no roster to mirror".
+    func managedAccounts() -> [ManagedAccount] {
+        let statePath = (NSHomeDirectory() as NSString).appendingPathComponent(".cux/state.json")
+        guard let data = FileManager.default.contents(atPath: statePath),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accounts = root["accounts"] as? [String: [String: Any]] else {
+            return []
+        }
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: accountsDir)) ?? []
+        var result: [ManagedAccount] = []
+        for (_, a) in accounts {
+            guard let slot = a["slot"] as? Int, let email = a["email"] as? String else { continue }
+            var oauthJSON: String? = nil
+            if let entry = entries.first(where: { $0.hasSuffix("-\(email)") }) {
+                let path = (accountsDir as NSString).appendingPathComponent("\(entry)/oauth.json")
+                if let d = FileManager.default.contents(atPath: path) {
+                    oauthJSON = String(data: d, encoding: .utf8)
+                }
+            }
+            result.append(ManagedAccount(slot: slot, email: email,
+                                         alias: a["alias"] as? String,
+                                         accountUuid: a["uuid"] as? String,
+                                         oauthAccountJSON: oauthJSON))
+        }
+        return result.sorted { $0.slot < $1.slot }
+    }
+
     /// Reads the full credential blob JSON (`{"claudeAiOauth": {...}, ...}`) from
     /// the slot's backup entry. Read-only; never rotates or mutates anything.
     func readCredentials(_ slot: Slot) -> String? {
