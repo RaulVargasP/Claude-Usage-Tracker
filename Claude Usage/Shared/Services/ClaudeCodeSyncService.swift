@@ -1043,6 +1043,13 @@ class ClaudeCodeSyncService {
                                     LoggingService.shared.logError("ensureFreshCredentials: refreshed active-profile tokens but keychain writeback failed — CLI may need /login", error: error)
                                 }
                                 persistProfileCredentialsJSON(profileId: profileId, json: updatedJSON)
+                                // Also hand the rotated lineage to cux's backup immediately.
+                                // cux would harvest it from the live keychain eventually, but
+                                // only while this account stays active — write back now so no
+                                // stale-lineage window remains if the user switches away.
+                                if let slot = CuxBridge.shared.slot(forOAuthAccountJSON: profile.oauthAccountJSON) {
+                                    CuxBridge.shared.writeCredentials(updatedJSON, to: slot)
+                                }
                                 LoggingService.shared.log("✓ ensureFreshCredentials: refreshed idle active-profile token and wrote back to system keychain")
                                 return updatedJSON
                             }
@@ -1061,6 +1068,7 @@ class ClaudeCodeSyncService {
         }
 
         var initialJSON: String?
+        var cuxSlot: CuxBridge.Slot? = nil
         if let svc = customSvc {
             initialJSON = readKeychainCredentials(serviceName: svc)
             if initialJSON == nil {
@@ -1074,6 +1082,20 @@ class ClaudeCodeSyncService {
             }
         } else {
             initialJSON = profile.cliCredentialsJSON
+            // Non-active & unpinned: when `cux` manages this account, its backup entry
+            // holds the authoritative lineage (cux keeps it fresh and re-reads it before
+            // every refresh — see CuxBridge). Prefer whichever snapshot expires later:
+            // ours can only be newer in the short window before cux harvests a rotation.
+            if let slot = CuxBridge.shared.slot(forOAuthAccountJSON: profile.oauthAccountJSON) {
+                cuxSlot = slot
+                if let cuxJSON = CuxBridge.shared.readCredentials(slot) {
+                    let cuxExpiry = extractTokenExpiry(from: cuxJSON) ?? .distantPast
+                    let ownExpiry = initialJSON.flatMap { extractTokenExpiry(from: $0) } ?? .distantPast
+                    if initialJSON == nil || cuxExpiry >= ownExpiry {
+                        initialJSON = cuxJSON
+                    }
+                }
+            }
         }
 
         guard let cliJSON = initialJSON else {
@@ -1083,9 +1105,11 @@ class ClaudeCodeSyncService {
         // Fast path: token still valid beyond the leeway window.
         if let expiryDate = extractTokenExpiry(from: cliJSON),
            expiryDate.timeIntervalSinceNow > Self.refreshLeewaySeconds {
-            // If we sourced from a custom keychain entry, mirror its current contents into the
-            // profile cache so display code (menu bar, popover) sees the up-to-date tokens.
-            if customSvc != nil {
+            // If we sourced from a custom keychain entry or cux's backup, mirror the
+            // current contents into the profile cache so display code (menu bar,
+            // popover) sees the up-to-date tokens — and so a stale private snapshot
+            // heals instead of lingering as a dead lineage.
+            if customSvc != nil || cuxSlot != nil {
                 persistProfileCredentialsJSON(profileId: profileId, json: cliJSON)
             }
             return cliJSON
@@ -1149,6 +1173,12 @@ class ClaudeCodeSyncService {
             } catch {
                 LoggingService.shared.logError("ensureFreshCredentials: refreshed but failed to write back to keychain '\(svc)'", error: error)
             }
+        }
+        // Hand the rotated lineage back to cux so its next refresh starts from it
+        // instead of consuming the token we just used — which would fail with
+        // invalid_grant, or trip reuse detection and revoke the whole family.
+        if let slot = cuxSlot {
+            CuxBridge.shared.writeCredentials(updatedJSON, to: slot)
         }
 
         LoggingService.shared.log("✓ ensureFreshCredentials: refreshed and saved for profile '\(profile.name)'")
@@ -1275,6 +1305,17 @@ class ClaudeCodeSyncService {
         }
         profiles[index].cliAccountSyncedAt = Date()  // Update sync timestamp
         ProfileStore.shared.saveProfiles(profiles)
+
+        // The account we just captured is about to STOP being the active one, and
+        // cux's harvest only reconciles the ACTIVE account's live keychain into its
+        // backup. If Claude Code rotated this lineage since cux last saw it, cux's
+        // backup is now stale — its next refresh would consume a dead token (or trip
+        // reuse detection and revoke the family). Hand the captured lineage back to
+        // cux before the switch strands it.
+        let identityJSON = freshOAuthAccount ?? profiles[index].oauthAccountJSON
+        if let slot = CuxBridge.shared.slot(forOAuthAccountJSON: identityJSON) {
+            CuxBridge.shared.writeCredentials(freshJSON, to: slot)
+        }
 
         LoggingService.shared.log("✓ Re-synced CLI credentials from system and updated timestamp\(freshOAuthAccount != nil ? " (with oauthAccount)" : "")")
     }
