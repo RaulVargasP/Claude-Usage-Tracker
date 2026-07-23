@@ -1019,8 +1019,18 @@ class ClaudeCodeSyncService {
             if let systemJSON = try? readSystemCredentials() {
                 let systemIdentity = accountIdentity(fromOAuthAccountJSON: readOAuthAccount())
                 let profileIdentity = accountIdentity(fromOAuthAccountJSON: profile.oauthAccountJSON)
-                let sameAccount = (systemIdentity != nil && systemIdentity == profileIdentity)
-                    || extractRefreshToken(from: systemJSON) == profile.cliCredentialsJSON.flatMap(extractRefreshToken)
+                // When BOTH identities are known they are decisive. The refresh-token
+                // equality clause is only a fallback for when identity is unavailable:
+                // a profile snapshot contaminated with the system account's tokens by
+                // older capture code would otherwise "prove" same-account via token
+                // equality even though the identities differ — making the app display
+                // (and keep re-capturing) another account's usage under this profile.
+                let sameAccount: Bool
+                if let sys = systemIdentity, let prof = profileIdentity {
+                    sameAccount = (sys == prof)
+                } else {
+                    sameAccount = extractRefreshToken(from: systemJSON) == profile.cliCredentialsJSON.flatMap(extractRefreshToken)
+                }
                 if sameAccount {
                     if !isTokenExpired(systemJSON) {
                         persistProfileCredentialsJSON(profileId: profileId, json: systemJSON)
