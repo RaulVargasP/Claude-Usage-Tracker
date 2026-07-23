@@ -100,6 +100,27 @@ class ProfileManager: ObservableObject {
             LoggingService.shared.log("syncProfilesFromCux: created profile '\(profile.name)' for cux slot \(account.slot) (\(account.email))")
         }
 
+        // Keep every surface in the same order: cux-managed profiles sorted by
+        // their cux slot (matching `cux list` and the desktop widget), with any
+        // non-cux profiles after them in their existing relative order.
+        var slotForProfile: [UUID: Int] = [:]
+        for profile in profiles {
+            guard let identity = cliSyncService.accountIdentity(fromOAuthAccountJSON: profile.oauthAccountJSON) else { continue }
+            if let match = managed.first(where: { $0.accountUuid == identity || $0.email.lowercased() == identity.lowercased() }) {
+                slotForProfile[profile.id] = match.slot
+            }
+        }
+        let ordered = profiles.enumerated().sorted { a, b in
+            let slotA = slotForProfile[a.element.id] ?? Int.max
+            let slotB = slotForProfile[b.element.id] ?? Int.max
+            return slotA == slotB ? a.offset < b.offset : slotA < slotB
+        }.map(\.element)
+        if ordered.map(\.id) != profiles.map(\.id) {
+            profiles = ordered
+            changed = true
+            LoggingService.shared.log("syncProfilesFromCux: reordered profiles to match cux slot order")
+        }
+
         if changed {
             profileStore.saveProfiles(profiles)
         }
