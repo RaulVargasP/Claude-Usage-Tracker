@@ -1062,9 +1062,12 @@ class ClaudeCodeSyncService {
                     return systemJSON
                 }
             }
-            // Different account in system, or no system creds — fall back to the cached
-            // snapshot WITHOUT refreshing; never rotate a lineage the CLI may own.
-            return profile.cliCredentialsJSON
+            // Different account in the system keychain (e.g. the user switched via
+            // cux/VS Code and our active-profile pointer is stale), or no system
+            // creds at all. The cached snapshot may hold ANOTHER account's tokens
+            // captured by an older version — returning it would silently poll the
+            // wrong account. Fall through to the generic path instead: it sources
+            // this profile's own lineage (cux backup when available) read-only.
         }
 
         var initialJSON: String?
@@ -1082,18 +1085,17 @@ class ClaudeCodeSyncService {
             }
         } else {
             initialJSON = profile.cliCredentialsJSON
-            // Non-active & unpinned: when `cux` manages this account, its backup entry
-            // holds the authoritative lineage (cux keeps it fresh and re-reads it before
-            // every refresh — see CuxBridge). Prefer whichever snapshot expires later:
-            // ours can only be newer in the short window before cux harvests a rotation.
+            // Unpinned: when `cux` manages this account, its backup entry holds the
+            // authoritative lineage (cux keeps it fresh and re-reads it before every
+            // refresh — see CuxBridge). Prefer it whenever readable: the entry is keyed
+            // by ACCOUNT IDENTITY (email), so sourcing from it also protects against
+            // profile snapshots contaminated with another account's tokens by older
+            // capture bugs. Our own snapshot could only be newer if a write-back just
+            // failed, and that failure is logged loudly.
             if let slot = CuxBridge.shared.slot(forOAuthAccountJSON: profile.oauthAccountJSON) {
                 cuxSlot = slot
                 if let cuxJSON = CuxBridge.shared.readCredentials(slot) {
-                    let cuxExpiry = extractTokenExpiry(from: cuxJSON) ?? .distantPast
-                    let ownExpiry = initialJSON.flatMap { extractTokenExpiry(from: $0) } ?? .distantPast
-                    if initialJSON == nil || cuxExpiry >= ownExpiry {
-                        initialJSON = cuxJSON
-                    }
+                    initialJSON = cuxJSON
                 }
             }
         }
